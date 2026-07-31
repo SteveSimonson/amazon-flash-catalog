@@ -239,17 +239,32 @@ async function handleApi(
 
   // Public catalog for consumer sites
   const catalogMatch = path.match(/^\/api\/catalog\/([a-z0-9-]+)$/i)
-  if (catalogMatch && request.method === 'GET') {
+  if (
+    catalogMatch &&
+    (request.method === 'GET' || request.method === 'HEAD')
+  ) {
     const siteId = catalogMatch[1]
     const catalog = await readLatestCatalog(env, siteId)
-    if (!catalog) return json({ error: 'Catalog not found' }, 404)
-    return json(catalog, 200, {
+    if (!catalog) {
+      if (request.method === 'HEAD') {
+        return new Response(null, { status: 404 })
+      }
+      return json({ error: 'Catalog not found' }, 404)
+    }
+    const headers = {
       'Cache-Control': 'public, max-age=300',
       'Access-Control-Allow-Origin': '*',
-    })
+    }
+    if (request.method === 'HEAD') {
+      return new Response(null, { status: 200, headers })
+    }
+    return json(catalog, 200, headers)
   }
 
-  if (path === '/api/health' && request.method === 'GET') {
+  if (
+    path === '/api/health' &&
+    (request.method === 'GET' || request.method === 'HEAD')
+  ) {
     return json({ ok: true, app: env.APP_NAME || 'amazon-flash-catalog' })
   }
 

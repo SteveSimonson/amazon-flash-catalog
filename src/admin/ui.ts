@@ -9,6 +9,16 @@ function esc(s: string): string {
     .replace(/"/g, '&quot;')
 }
 
+/** Safe embed of JSON inside a <script> tag (prevents </script> breakout). */
+function jsonForScript(value: unknown): string {
+  return JSON.stringify(value)
+    .replace(/</g, '\\u003c')
+    .replace(/>/g, '\\u003e')
+    .replace(/&/g, '\\u0026')
+    .replace(/\u2028/g, '\\u2028')
+    .replace(/\u2029/g, '\\u2029')
+}
+
 function layout(title: string, body: string, user?: SessionUser | null): string {
   const nav = user
     ? `<div class="nav-user">
@@ -24,6 +34,7 @@ function layout(title: string, body: string, user?: SessionUser | null): string 
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <meta name="robots" content="noindex,nofollow" />
+  <meta http-equiv="Content-Security-Policy" content="frame-ancestors 'none'; default-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src 'self' https://avatars.githubusercontent.com data:;" />
   <title>${esc(title)}</title>
   <style>
     :root {
@@ -223,17 +234,6 @@ export function siteEditorPage(
   user: SessionUser,
   catalogPath: string,
 ): string {
-  const catsJson = JSON.stringify(site.categories.length ? site.categories : [])
-  const emptyCat = JSON.stringify({
-    id: '',
-    label: '',
-    browseNode: '',
-    searchQuery: '',
-    enabled: true,
-    siteCategory: '',
-    filters: defaultFilters(),
-  })
-
   const body = `
     <p class="muted"><a href="/admin">← All sites</a></p>
     <div class="card">
@@ -293,9 +293,25 @@ export function siteEditorPage(
     </div>
 
     <script>
-      const siteId = ${JSON.stringify(site.id)};
-      let categories = ${catsJson};
-      const emptyCat = ${emptyCat};
+      const siteId = ${jsonForScript(site.id)};
+      let categories = ${jsonForScript(site.categories.length ? site.categories : [])};
+      const emptyCat = ${jsonForScript({
+        id: '',
+        label: '',
+        browseNode: '',
+        searchQuery: '',
+        enabled: true,
+        siteCategory: '',
+        filters: defaultFilters(),
+      })};
+
+      function attrEsc(s) {
+        return String(s ?? '')
+          .replace(/&/g, '&amp;')
+          .replace(/"/g, '&quot;')
+          .replace(/</g, '&lt;')
+          .replace(/>/g, '&gt;');
+      }
 
       function kw(list) { return (list || []).join(', '); }
       function parseKw(s) {
@@ -313,11 +329,11 @@ export function siteEditorPage(
           return \`<div class="cat-block" data-i="\${i}">
             <h3>Category \${i + 1} <button type="button" class="secondary danger rm" data-i="\${i}" style="float:right;padding:0.25rem 0.5rem;font-size:0.8rem">Remove</button></h3>
             <div class="grid-2">
-              <label>Source id <input data-f="id" data-i="\${i}" value="\${c.id || ''}" placeholder="kitchen-utensils" /></label>
-              <label>Label <input data-f="label" data-i="\${i}" value="\${c.label || ''}" placeholder="Kitchen Utensils" /></label>
-              <label>Browse node <input data-f="browseNode" data-i="\${i}" value="\${c.browseNode || ''}" placeholder="289754" /></label>
-              <label>Search query <input data-f="searchQuery" data-i="\${i}" value="\${c.searchQuery || ''}" placeholder="bamboo kitchen utensils" /></label>
-              <label>Site shelf / category <input data-f="siteCategory" data-i="\${i}" value="\${c.siteCategory || ''}" placeholder="kitchen" /></label>
+              <label>Source id <input data-f="id" data-i="\${i}" value="\${attrEsc(c.id || '')}" placeholder="kitchen-utensils" /></label>
+              <label>Label <input data-f="label" data-i="\${i}" value="\${attrEsc(c.label || '')}" placeholder="Kitchen Utensils" /></label>
+              <label>Browse node <input data-f="browseNode" data-i="\${i}" value="\${attrEsc(c.browseNode || '')}" placeholder="289754" /></label>
+              <label>Search query <input data-f="searchQuery" data-i="\${i}" value="\${attrEsc(c.searchQuery || '')}" placeholder="bamboo kitchen utensils" /></label>
+              <label>Site shelf / category <input data-f="siteCategory" data-i="\${i}" value="\${attrEsc(c.siteCategory || '')}" placeholder="kitchen" /></label>
               <label>Enabled
                 <select data-f="enabled" data-i="\${i}">
                   <option value="true" \${c.enabled !== false ? 'selected' : ''}>Yes</option>
@@ -327,11 +343,11 @@ export function siteEditorPage(
             </div>
             <p class="muted" style="margin:0.75rem 0 0.35rem">Filters</p>
             <div class="grid-2">
-              <label>Top N <input type="number" data-ff="topN" data-i="\${i}" value="\${f.topN ?? 40}" min="1" max="200" /></label>
-              <label>Min rating <input type="number" data-ff="minRating" data-i="\${i}" value="\${f.minRating ?? 0}" min="0" max="5" step="0.1" /></label>
-              <label>Min reviews <input type="number" data-ff="minReviews" data-i="\${i}" value="\${f.minReviews ?? 0}" min="0" /></label>
-              <label>Min price USD <input type="number" data-ff="minPrice" data-i="\${i}" value="\${f.minPrice ?? ''}" step="0.01" placeholder="open" /></label>
-              <label>Max price USD <input type="number" data-ff="maxPrice" data-i="\${i}" value="\${f.maxPrice ?? ''}" step="0.01" placeholder="open" /></label>
+              <label>Top N <input type="number" data-ff="topN" data-i="\${i}" value="\${attrEsc(f.topN ?? 40)}" min="1" max="200" /></label>
+              <label>Min rating <input type="number" data-ff="minRating" data-i="\${i}" value="\${attrEsc(f.minRating ?? 0)}" min="0" max="5" step="0.1" /></label>
+              <label>Min reviews <input type="number" data-ff="minReviews" data-i="\${i}" value="\${attrEsc(f.minReviews ?? 0)}" min="0" /></label>
+              <label>Min price USD <input type="number" data-ff="minPrice" data-i="\${i}" value="\${attrEsc(f.minPrice ?? '')}" step="0.01" placeholder="open" /></label>
+              <label>Max price USD <input type="number" data-ff="maxPrice" data-i="\${i}" value="\${attrEsc(f.maxPrice ?? '')}" step="0.01" placeholder="open" /></label>
               <label>Require include keywords
                 <select data-ff="requireKeywordMatch" data-i="\${i}">
                   <option value="false" \${!f.requireKeywordMatch ? 'selected' : ''}>No (soft)</option>
@@ -339,10 +355,10 @@ export function siteEditorPage(
                 </select>
               </label>
               <label style="grid-column:1/-1">Include keywords (comma-separated)
-                <input data-ff="includeKeywords" data-i="\${i}" value="\${kw(f.includeKeywords)}" placeholder="bamboo" />
+                <input data-ff="includeKeywords" data-i="\${i}" value="\${attrEsc(kw(f.includeKeywords))}" placeholder="bamboo" />
               </label>
               <label style="grid-column:1/-1">Exclude keywords
-                <input data-ff="excludeKeywords" data-i="\${i}" value="\${kw(f.excludeKeywords)}" placeholder="plastic, toy" />
+                <input data-ff="excludeKeywords" data-i="\${i}" value="\${attrEsc(kw(f.excludeKeywords))}" placeholder="plastic, toy" />
               </label>
             </div>
           </div>\`;

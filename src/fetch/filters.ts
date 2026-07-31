@@ -37,11 +37,16 @@ export function applyFilters(
   if (filters.minReviews > 0) {
     list = list.filter((p) => (p.reviewCount ?? 0) >= filters.minReviews)
   }
+  // When a price bound is set, drop products with unknown price (scrape-only).
   if (filters.minPrice != null) {
-    list = list.filter((p) => p.price == null || p.price >= filters.minPrice!)
+    list = list.filter(
+      (p) => p.price != null && p.price >= filters.minPrice!,
+    )
   }
   if (filters.maxPrice != null) {
-    list = list.filter((p) => p.price == null || p.price <= filters.maxPrice!)
+    list = list.filter(
+      (p) => p.price != null && p.price <= filters.maxPrice!,
+    )
   }
 
   // Prefer lower BSR rank, then higher rating

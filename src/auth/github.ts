@@ -69,12 +69,7 @@ export async function fetchGitHubUser(
     avatar_url?: string
   }
 
-  const orgsRes = await fetch('https://api.github.com/user/orgs', { headers })
-  const orgs: string[] = []
-  if (orgsRes.ok) {
-    const list = (await orgsRes.json()) as Array<{ login: string }>
-    for (const o of list) orgs.push(o.login.toLowerCase())
-  }
+  const orgs = await listUserOrgs(accessToken)
 
   return {
     login: user.login,
@@ -83,6 +78,56 @@ export async function fetchGitHubUser(
     avatarUrl: user.avatar_url,
     orgs,
   }
+}
+
+/** Paginate /user/orgs (100 per page). */
+export async function listUserOrgs(accessToken: string): Promise<string[]> {
+  const headers = {
+    Accept: 'application/vnd.github+json',
+    Authorization: `Bearer ${accessToken}`,
+    'User-Agent': 'amazon-flash-catalog',
+    'X-GitHub-Api-Version': '2022-11-28',
+  }
+  const orgs: string[] = []
+  for (let page = 1; page <= 10; page++) {
+    const orgsRes = await fetch(
+      `https://api.github.com/user/orgs?per_page=100&page=${page}`,
+      { headers },
+    )
+    if (!orgsRes.ok) break
+    const list = (await orgsRes.json()) as Array<{ login: string }>
+    if (!list.length) break
+    for (const o of list) orgs.push(o.login.toLowerCase())
+    if (list.length < 100) break
+  }
+  return orgs
+}
+
+/**
+ * Live membership check for one org (preferred over frozen session orgs list).
+ * Uses GET /user/memberships/orgs/{org}
+ */
+export async function checkOrgMembership(
+  accessToken: string,
+  org: string,
+): Promise<boolean> {
+  const slug = org.trim()
+  if (!slug) return false
+  const res = await fetch(
+    `https://api.github.com/user/memberships/orgs/${encodeURIComponent(slug)}`,
+    {
+      headers: {
+        Accept: 'application/vnd.github+json',
+        Authorization: `Bearer ${accessToken}`,
+        'User-Agent': 'amazon-flash-catalog',
+        'X-GitHub-Api-Version': '2022-11-28',
+      },
+    },
+  )
+  if (res.status === 404) return false
+  if (!res.ok) return false
+  const data = (await res.json()) as { state?: string }
+  return data.state === 'active'
 }
 
 /** True if user belongs to ALLOWED_GITHUB_ORG (case-insensitive). */

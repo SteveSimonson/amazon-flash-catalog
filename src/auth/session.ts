@@ -1,7 +1,17 @@
 import type { SessionUser } from '../types'
 
 const COOKIE = 'afc_session'
-const MAX_AGE_SEC = 60 * 60 * 24 * 7 // 7 days
+/** 12h — shorter window so org removal bites sooner without stored tokens */
+const MAX_AGE_SEC = 60 * 60 * 12
+
+export type SessionPayload = {
+  u: SessionUser
+  exp: number
+  /** GitHub OAuth access token for live org re-check (HttpOnly cookie only) */
+  ghToken?: string
+  /** Unix sec when orgs were last refreshed from GitHub */
+  orgsCheckedAt?: number
+}
 
 function b64url(bytes: ArrayBuffer | Uint8Array): string {
   const u8 = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes)
@@ -32,10 +42,13 @@ async function hmacKey(secret: string): Promise<CryptoKey> {
 export async function signSession(
   user: SessionUser,
   secret: string,
+  opts?: { ghToken?: string; orgsCheckedAt?: number },
 ): Promise<string> {
-  const payload = {
+  const payload: SessionPayload = {
     u: user,
     exp: Math.floor(Date.now() / 1000) + MAX_AGE_SEC,
+    ghToken: opts?.ghToken,
+    orgsCheckedAt: opts?.orgsCheckedAt ?? Math.floor(Date.now() / 1000),
   }
   const body = b64url(new TextEncoder().encode(JSON.stringify(payload)))
   const key = await hmacKey(secret)
@@ -45,10 +58,10 @@ export async function signSession(
   return `${body}.${sig}`
 }
 
-export async function verifySession(
+export async function verifySessionPayload(
   token: string | null | undefined,
   secret: string,
-): Promise<SessionUser | null> {
+): Promise<SessionPayload | null> {
   if (!token || !secret) return null
   const [body, sig] = token.split('.')
   if (!body || !sig) return null
@@ -63,13 +76,21 @@ export async function verifySession(
   try {
     const payload = JSON.parse(
       new TextDecoder().decode(b64urlDecode(body)),
-    ) as { u: SessionUser; exp: number }
+    ) as SessionPayload
     if (!payload.exp || payload.exp < Math.floor(Date.now() / 1000)) return null
     if (!payload.u?.login) return null
-    return payload.u
+    return payload
   } catch {
     return null
   }
+}
+
+export async function verifySession(
+  token: string | null | undefined,
+  secret: string,
+): Promise<SessionUser | null> {
+  const p = await verifySessionPayload(token, secret)
+  return p?.u ?? null
 }
 
 export function readSessionCookie(request: Request): string | null {
@@ -102,9 +123,40 @@ export function clearSessionCookie(secure: boolean): string {
   return flags.join('; ')
 }
 
+export function oauthStateCookie(state: string, secure: boolean): string {
+  const flags = [
+    `afc_oauth_state=${state}`,
+    'Path=/',
+    'HttpOnly',
+    'SameSite=Lax',
+    'Max-Age=600',
+  ]
+  if (secure) flags.push('Secure')
+  return flags.join('; ')
+}
+
+export function clearOauthStateCookie(secure: boolean): string {
+  const flags = [
+    'afc_oauth_state=',
+    'Path=/',
+    'HttpOnly',
+    'SameSite=Lax',
+    'Max-Age=0',
+  ]
+  if (secure) flags.push('Secure')
+  return flags.join('; ')
+}
+
 export async function getSessionUser(
   request: Request,
   secret: string,
 ): Promise<SessionUser | null> {
   return verifySession(readSessionCookie(request), secret)
+}
+
+export async function getSessionPayload(
+  request: Request,
+  secret: string,
+): Promise<SessionPayload | null> {
+  return verifySessionPayload(readSessionCookie(request), secret)
 }

@@ -1,12 +1,17 @@
 import {
+  checkOrgMembership,
   exchangeCode,
   fetchGitHubUser,
   githubAuthorizeUrl,
   isOrgAllowed,
+  listUserOrgs,
 } from './auth/github'
 import {
+  clearOauthStateCookie,
   clearSessionCookie,
+  getSessionPayload,
   getSessionUser,
+  oauthStateCookie,
   setSessionCookie,
   signSession,
 } from './auth/session'
@@ -67,19 +72,96 @@ function isSecure(url: URL): boolean {
   return url.protocol === 'https:'
 }
 
+/** Block cross-site mutating API calls (defense in depth with SameSite=Lax). */
+function assertSameOrigin(request: Request, url: URL): Response | null {
+  if (request.method === 'GET' || request.method === 'HEAD') return null
+  const origin = request.headers.get('Origin')
+  if (origin) {
+    try {
+      if (new URL(origin).origin !== url.origin) {
+        return json({ error: 'CSRF: bad Origin' }, 403)
+      }
+      return null
+    } catch {
+      return json({ error: 'CSRF: bad Origin' }, 403)
+    }
+  }
+  const referer = request.headers.get('Referer')
+  if (referer) {
+    try {
+      if (new URL(referer).origin !== url.origin) {
+        return json({ error: 'CSRF: bad Referer' }, 403)
+      }
+      return null
+    } catch {
+      return json({ error: 'CSRF: bad Referer' }, 403)
+    }
+  }
+  // Non-browser clients (curl) without Origin/Referer: allow for ops; browsers send Origin on fetch.
+  return null
+}
+
+const ORG_RECHECK_SEC = 15 * 60 // live re-check at least every 15 minutes
+
 async function requireAdmin(
   request: Request,
   env: Env,
-): Promise<Response | Awaited<ReturnType<typeof getSessionUser>>> {
+): Promise<
+  | Response
+  | {
+      user: NonNullable<Awaited<ReturnType<typeof getSessionUser>>>
+      setCookie?: string
+    }
+> {
   if (!env.SESSION_SECRET) {
     return json({ error: 'SESSION_SECRET not configured' }, 500)
   }
-  const user = await getSessionUser(request, env.SESSION_SECRET)
-  if (!user) return json({ error: 'Unauthorized' }, 401)
-  if (!isOrgAllowed(user, env.ALLOWED_GITHUB_ORG)) {
+  const payload = await getSessionPayload(request, env.SESSION_SECRET)
+  if (!payload?.u) return json({ error: 'Unauthorized' }, 401)
+
+  let user = payload.u
+  let setCookie: string | undefined
+  const now = Math.floor(Date.now() / 1000)
+  const stale =
+    !payload.orgsCheckedAt || now - payload.orgsCheckedAt > ORG_RECHECK_SEC
+
+  if (stale && payload.ghToken && env.ALLOWED_GITHUB_ORG) {
+    const member = await checkOrgMembership(
+      payload.ghToken,
+      env.ALLOWED_GITHUB_ORG,
+    )
+    if (!member) {
+      return json(
+        { error: 'Forbidden: no longer a member of allowed GitHub org' },
+        403,
+      )
+    }
+    const orgs = await listUserOrgs(payload.ghToken)
+    user = { ...user, orgs }
+    const token = await signSession(user, env.SESSION_SECRET, {
+      ghToken: payload.ghToken,
+      orgsCheckedAt: now,
+    })
+    setCookie = setSessionCookie(token, isSecure(new URL(request.url)))
+  } else if (!isOrgAllowed(user, env.ALLOWED_GITHUB_ORG)) {
     return json({ error: 'Forbidden: not a member of allowed GitHub org' }, 403)
   }
-  return user
+
+  return { user, setCookie }
+}
+
+function withAdminCookie(
+  res: Response,
+  setCookie?: string,
+): Response {
+  if (!setCookie) return res
+  const headers = new Headers(res.headers)
+  headers.append('Set-Cookie', setCookie)
+  return new Response(res.body, {
+    status: res.status,
+    statusText: res.statusText,
+    headers,
+  })
 }
 
 function parseSourceCategories(raw: unknown): SourceCategory[] {
@@ -137,17 +219,20 @@ async function handleApi(
     return json({ ok: true, app: env.APP_NAME || 'amazon-flash-catalog' })
   }
 
+  const csrf = assertSameOrigin(request, url)
+  if (csrf) return csrf
+
   const auth = await requireAdmin(request, env)
   if (auth instanceof Response) return auth
-  const user = auth
+  const { user, setCookie } = auth
 
   if (path === '/api/me' && request.method === 'GET') {
-    return json({ user })
+    return withAdminCookie(json({ user }), setCookie)
   }
 
   if (path === '/api/sites' && request.method === 'GET') {
     const config = await loadConfig(env)
-    return json(config)
+    return withAdminCookie(json(config), setCookie)
   }
 
   if (path === '/api/sites' && request.method === 'POST') {
@@ -170,7 +255,7 @@ async function handleApi(
       siteUrl: body.siteUrl?.trim() || undefined,
     })
     await upsertSite(env, site)
-    return json({ ok: true, site })
+    return withAdminCookie(json({ ok: true, site }), setCookie)
   }
 
   const siteMatch = path.match(/^\/api\/sites\/([a-z0-9-]+)(\/.*)?$/i)
@@ -179,13 +264,10 @@ async function handleApi(
     const rest = siteMatch[2] || ''
     const config = await loadConfig(env)
     const site = config.sites.find((s) => s.id === siteId)
-    if (!site && request.method !== 'POST') {
-      // allow create only via /api/sites
-    }
-    if (!site) return json({ error: 'Site not found' }, 404)
+    if (!site) return withAdminCookie(json({ error: 'Site not found' }, 404), setCookie)
 
     if (rest === '' && request.method === 'GET') {
-      return json({ site })
+      return withAdminCookie(json({ site }), setCookie)
     }
 
     if (rest === '' && request.method === 'PUT') {
@@ -207,12 +289,12 @@ async function handleApi(
         schedule,
       }
       await upsertSite(env, next)
-      return json({ ok: true, site: next })
+      return withAdminCookie(json({ ok: true, site: next }), setCookie)
     }
 
     if (rest === '' && request.method === 'DELETE') {
       await deleteSite(env, siteId)
-      return json({ ok: true })
+      return withAdminCookie(json({ ok: true }), setCookie)
     }
 
     if (rest === '/categories' && request.method === 'PUT') {
@@ -221,22 +303,25 @@ async function handleApi(
         const categories = parseSourceCategories(body.categories)
         const next = { ...site, categories }
         await upsertSite(env, next)
-        return json({ ok: true, site: next })
+        return withAdminCookie(json({ ok: true, site: next }), setCookie)
       } catch (e) {
-        return json(
-          { error: e instanceof Error ? e.message : 'Invalid categories' },
-          400,
+        return withAdminCookie(
+          json(
+            { error: e instanceof Error ? e.message : 'Invalid categories' },
+            400,
+          ),
+          setCookie,
         )
       }
     }
 
     if (rest === '/refresh' && request.method === 'POST') {
       const result = await refreshSite(env, site)
-      return json(result, result.ok ? 200 : 502)
+      return withAdminCookie(json(result, result.ok ? 200 : 502), setCookie)
     }
   }
 
-  return json({ error: 'Not found' }, 404)
+  return withAdminCookie(json({ error: 'Not found' }, 404), setCookie)
 }
 
 async function handleAdminPages(
@@ -310,18 +395,9 @@ export default {
         const state = crypto.randomUUID()
         const location = githubAuthorizeUrl(env, state)
         const secure = isSecure(url)
-        // store state in short-lived cookie
-        const stateCookie = [
-          `afc_oauth_state=${state}`,
-          'Path=/',
-          'HttpOnly',
-          'SameSite=Lax',
-          'Max-Age=600',
-          secure ? 'Secure' : '',
-        ]
-          .filter(Boolean)
-          .join('; ')
-        return redirect(location, { 'Set-Cookie': stateCookie })
+        return redirect(location, {
+          'Set-Cookie': oauthStateCookie(state, secure),
+        })
       }
 
       if (url.pathname === '/auth/callback' && request.method === 'GET') {
@@ -336,7 +412,11 @@ export default {
         try {
           const token = await exchangeCode(env, code)
           const ghUser = await fetchGitHubUser(token)
-          if (!isOrgAllowed(ghUser, env.ALLOWED_GITHUB_ORG)) {
+          const member = await checkOrgMembership(
+            token,
+            env.ALLOWED_GITHUB_ORG,
+          )
+          if (!member && !isOrgAllowed(ghUser, env.ALLOWED_GITHUB_ORG)) {
             return redirect(
               '/login?error=' +
                 encodeURIComponent(
@@ -344,14 +424,14 @@ export default {
                 ),
             )
           }
-          const session = await signSession(ghUser, env.SESSION_SECRET)
+          const session = await signSession(ghUser, env.SESSION_SECRET, {
+            ghToken: token,
+            orgsCheckedAt: Math.floor(Date.now() / 1000),
+          })
           const secure = isSecure(url)
           const headers = new Headers({ Location: '/admin' })
           headers.append('Set-Cookie', setSessionCookie(session, secure))
-          headers.append(
-            'Set-Cookie',
-            'afc_oauth_state=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0',
-          )
+          headers.append('Set-Cookie', clearOauthStateCookie(secure))
           return new Response(null, { status: 302, headers })
         } catch (e) {
           const msg = e instanceof Error ? e.message : 'OAuth failed'

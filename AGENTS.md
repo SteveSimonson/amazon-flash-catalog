@@ -34,9 +34,13 @@ Deploy: `npm run deploy` (requires wrangler auth + R2 bucket + secrets).
 
 ## Security focus
 
-- Session cookie: HttpOnly, signed HMAC, org check on every admin route
+- Session cookie: HttpOnly, signed HMAC, 12h max-age
+- Org membership re-checked via GitHub API at least every 15 minutes (token in session)
+- Mutating `/api/*` requires same-origin Origin/Referer when present
+- Admin HTML: CSP `frame-ancestors 'none'`; JSON embedded with `jsonForScript`
 - Catalog GET is public by design (product JSON only — no secrets)
 - Do not log access tokens or credential secrets
+- Config is single R2 object (last-write-wins); avoid concurrent multi-admin edits for now
 
 ## Review focus
 

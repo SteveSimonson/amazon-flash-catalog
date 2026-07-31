@@ -19,10 +19,10 @@
   },
   "vars": {
     "APP_NAME": "Amazon Flash Catalog",
-    // GitHub org slug whose members may log in (e.g. "my-company")
-    "ALLOWED_GITHUB_ORG": "",
-    // Public origin of this worker (set after first deploy)
-    "APP_BASE_URL": "http://127.0.0.1:8787",
+    "ALLOWED_GITHUB_ORG": "ParsimonyGit",
+    "ALLOWED_GITHUB_USERS": "SteveSimonson",
+    // Updated after first deploy to workers.dev URL
+    "APP_BASE_URL": "https://amazon-flash-catalog.tech-bf6.workers.dev",
     "AMAZON_ASSOCIATE_TAG": "iu0e3-20",
     "AMAZON_MARKETPLACE": "www.amazon.com"
   }

@@ -5,6 +5,7 @@ dist/
 .env
 .env.*
 !.env.example
+.local/
 *.log
 .DS_Store
 worker-configuration.d.ts

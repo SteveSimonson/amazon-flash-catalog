@@ -38,15 +38,44 @@ function extractAsins(html: string): string[] {
 }
 
 function extractTitleNearAsin(html: string, asin: string): string | undefined {
-  const idx = html.indexOf(asin)
+  const idx = html.toUpperCase().indexOf(asin.toUpperCase())
   if (idx < 0) return undefined
-  const window = html.slice(Math.max(0, idx - 400), idx + 800)
+  const window = html.slice(Math.max(0, idx - 1200), idx + 1600)
+  const patterns = [
+    /"title"\s*:\s*"((?:\\.|[^"\\]){8,240})"/i,
+    /data-title="([^"]{8,240})"/i,
+    /aria-label="([^"]{8,240})"/i,
+    /alt="([^"]{8,240})"/i,
+    /<span[^>]*class="[^"]*a-size[^"]*"[^>]*>([^<]{8,240})<\/span>/i,
+    /<h2[^>]*>[\s\S]*?<span[^>]*>([^<]{8,240})<\/span>/i,
+  ]
+  for (const re of patterns) {
+    const m = window.match(re)
+    if (!m?.[1]) continue
+    const t = m[1]
+      .replace(/\\u0026/g, '&')
+      .replace(/\\"/g, '"')
+      .replace(/&amp;/g, '&')
+      .replace(/&quot;/g, '"')
+      .replace(/&#39;/g, "'")
+      .trim()
+    if (t.length >= 8 && !/^amazon product/i.test(t)) return t.slice(0, 200)
+  }
+  return undefined
+}
+
+function extractImageNearAsin(html: string, asin: string): string | undefined {
+  const idx = html.toUpperCase().indexOf(asin.toUpperCase())
+  if (idx < 0) return undefined
+  const window = html.slice(Math.max(0, idx - 800), idx + 1200)
   const m =
-    window.match(/aria-label="([^"]{8,200})"/i) ||
-    window.match(/alt="([^"]{8,200})"/i) ||
-    window.match(/<span[^>]*class="[^"]*a-size[^"]*"[^>]*>([^<]{8,200})<\/span>/i)
-  if (!m) return undefined
-  return m[1].replace(/&amp;/g, '&').replace(/&quot;/g, '"').trim()
+    window.match(
+      /(https:\/\/m\.media-amazon\.com\/images\/I\/[A-Za-z0-9._%+-]+\.jpg)/i,
+    ) ||
+    window.match(
+      /(https:\/\/images-na\.ssl-images-amazon\.com\/images\/I\/[A-Za-z0-9._%+-]+)/i,
+    )
+  return m?.[1]
 }
 
 async function fetchHtml(url: string): Promise<string> {
@@ -103,6 +132,7 @@ export async function discoverCategory(
       asin,
       title: extractTitleNearAsin(htmlBlob, asin) || `Amazon product ${asin}`,
       url: affiliateUrl(asin, opts.associateTag, host),
+      image: extractImageNearAsin(htmlBlob, asin),
       bsrRank: rank++,
       sourceCategoryId: cat.id,
       siteCategory: cat.siteCategory,

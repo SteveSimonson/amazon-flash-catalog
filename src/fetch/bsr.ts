@@ -53,6 +53,34 @@ function looksBamboo(text: string): boolean {
   return /\bbamboo\b/i.test(text)
 }
 
+/** Prefer durable Amazon listing CDN paths (`/images/I/…`), sized for cards. */
+export function normalizeAmazonImage(
+  url: string | undefined | null,
+): string | undefined {
+  if (!url) return undefined
+  let u = url.trim().replace(/^http:\/\//i, 'https://')
+  // Reject flaky ASIN P/ guesses — they often 404 as white tiles
+  if (/\/images\/P\/[A-Z0-9]{10}/i.test(u)) return undefined
+  if (!/\/images\/I\//i.test(u)) return undefined
+  u = u
+    .replace(/\._AC_UL\d+(?:_SR\d+,\d+)?(?:_QL\d+)?_\./i, '._AC_SL500_.')
+    .replace(/\._AC_UL[^.]+\./i, '._AC_SL500_.')
+    .replace(/\._AC_UX\d+_.*?\./i, '._AC_SL500_.')
+    .replace(/\._AC_UY\d+_.*?\./i, '._AC_SL500_.')
+    .replace(/\._AC_SL\d+_\./i, '._AC_SL500_.')
+    .replace(/\._SX\d+_\./i, '._SL500_.')
+    .replace(/\._SY\d+_\./i, '._SL500_.')
+  // Ensure a size token if bare /I/hash.jpg
+  if (!/\._[A-Z]{2}/i.test(u) && /\.jpg/i.test(u)) {
+    u = u.replace(/\.jpg/i, '._AC_SL500_.jpg')
+  }
+  return u
+}
+
+export function hasReliableImage(p: { image?: string }): boolean {
+  return Boolean(normalizeAmazonImage(p.image))
+}
+
 /** Ensure search queries always include bamboo. */
 export function bambooSearchQuery(cat: SourceCategory): string {
   const base = (cat.searchQuery || cat.label || cat.id || '').trim()
@@ -99,17 +127,23 @@ export function parseProductCards(html: string): Card[] {
         /src="(https:\/\/m\.media-amazon\.com\/images\/I\/[A-Za-z0-9,._%-]+\._AC_[^"]+\.jpg)"/i,
       ) ||
       block.match(
+        /data-src="(https:\/\/m\.media-amazon\.com\/images\/I\/[A-Za-z0-9,._%-]+[^"]*)"/i,
+      ) ||
+      block.match(
         /src="(https:\/\/m\.media-amazon\.com\/images\/I\/[A-Za-z0-9,._%-]+\.jpg)"/i,
       ) ||
       block.match(
         /(https:\/\/m\.media-amazon\.com\/images\/I\/[A-Za-z0-9,._%-]+)/i,
+      ) ||
+      block.match(
+        /(https:\/\/images-na\.ssl-images-amazon\.com\/images\/I\/[A-Za-z0-9,._%-]+)/i,
       )
 
     const title = cleanTitle(titleMatch?.[1])
     byAsin.set(asin, {
       asin,
       title,
-      image: imgMatch?.[1]?.replace(/\._AC_[A-Z0-9,]+_\./, '._AC_SL500_.'),
+      image: normalizeAmazonImage(imgMatch?.[1]),
     })
     if (byAsin.size >= 80) break
   }
@@ -142,22 +176,47 @@ async function fetchHtml(url: string): Promise<string> {
   return res.text()
 }
 
-/** Hydrate missing titles from product detail pages (capped concurrency). */
-export async function hydrateProductTitles(
+export type HydrateOpts = {
+  /** Max DP fetches */
+  limit?: number
+  /** Prefer products missing image and/or title */
+  preferMissingImage?: boolean
+}
+
+/**
+ * Hydrate missing titles/images from product detail pages.
+ * Prefers products missing reliable `/images/I/` photos.
+ */
+export async function hydrateProductMedia(
   products: FlashProduct[],
   marketplace: string,
-  limit = 24,
+  opts: HydrateOpts = {},
 ): Promise<FlashProduct[]> {
+  const limit = opts.limit ?? 36
   const host = marketplace.replace(/^https?:\/\//, '')
-  const need = products.filter(
-    (p) => !p.title || PLACEHOLDER_TITLE.test(p.title) || !looksBamboo(p.title),
-  )
+  const need = products
+    .filter(
+      (p) =>
+        !hasReliableImage(p) ||
+        !p.title ||
+        PLACEHOLDER_TITLE.test(p.title) ||
+        !looksBamboo(p.title),
+    )
+    .sort((a, b) => {
+      // Missing image first when requested
+      if (opts.preferMissingImage) {
+        const ai = hasReliableImage(a) ? 1 : 0
+        const bi = hasReliableImage(b) ? 1 : 0
+        if (ai !== bi) return ai - bi
+      }
+      return 0
+    })
   const targets = need.slice(0, limit)
   if (!targets.length) return products
 
   const byAsin = new Map<string, { title?: string; image?: string }>()
   const queue = [...targets]
-  const workers = Array.from({ length: Math.min(4, queue.length) }, async () => {
+  const workers = Array.from({ length: Math.min(5, queue.length) }, async () => {
     while (queue.length) {
       const p = queue.shift()
       if (!p) break
@@ -169,18 +228,23 @@ export async function hydrateProductTitles(
           ) || html.match(/<meta\s+name="title"\s+content="([^"]{8,240})"/i)
         const h1 = html.match(/id="productTitle"[^>]*>\s*([^<]{8,240})\s*</i)
         const title = cleanTitle(og?.[1] || h1?.[1])
+        const ogImg = html.match(
+          /<meta\s+property="og:image"\s+content="(https:\/\/[^"]+)"/i,
+        )
         const img =
           html.match(
-            /id="landingImage"[^>]*src="(https:\/\/m\.media-amazon\.com\/images\/I\/[^"]+)"/i,
+            /id="landingImage"[^>]*(?:data-old-hires|data-a-dynamic-image|src)="(https:\/\/m\.media-amazon\.com\/images\/I\/[^"]+)"/i,
           ) ||
           html.match(
             /"hiRes"\s*:\s*"(https:\/\/m\.media-amazon\.com\/images\/I\/[^"]+)"/i,
-          )
-        if (title || img) {
-          byAsin.set(p.asin.toUpperCase(), {
-            title,
-            image: img?.[1],
-          })
+          ) ||
+          html.match(
+            /"large"\s*:\s*"(https:\/\/m\.media-amazon\.com\/images\/I\/[^"]+)"/i,
+          ) ||
+          ogImg
+        const image = normalizeAmazonImage(img?.[1] || ogImg?.[1])
+        if (title || image) {
+          byAsin.set(p.asin.toUpperCase(), { title, image })
         }
       } catch {
         // skip
@@ -191,13 +255,24 @@ export async function hydrateProductTitles(
 
   return products.map((p) => {
     const h = byAsin.get(p.asin.toUpperCase())
-    if (!h) return p
+    if (!h) {
+      return { ...p, image: normalizeAmazonImage(p.image) }
+    }
     return {
       ...p,
       title: h.title || p.title,
-      image: h.image || p.image,
+      image: h.image || normalizeAmazonImage(p.image),
     }
   })
+}
+
+/** @deprecated use hydrateProductMedia */
+export async function hydrateProductTitles(
+  products: FlashProduct[],
+  marketplace: string,
+  limit = 24,
+): Promise<FlashProduct[]> {
+  return hydrateProductMedia(products, marketplace, { limit })
 }
 
 export function isPlaceholderTitle(title: string | undefined): boolean {
@@ -212,10 +287,11 @@ export async function discoverCategory(
   const host = opts.marketplace.replace(/^https?:\/\//, '')
   const q = bambooSearchQuery(cat)
   // Search-first only — broad BSR nodes inject non-bamboo junk.
+  // Simple search first (department filters often empty / blocked for bots)
   const urls = [
-    `https://${host}/s?k=${encodeURIComponent(q)}&i=garden&rh=n%3A1055398`,
     `https://${host}/s?k=${encodeURIComponent(q)}`,
-    `https://${host}/s?k=${encodeURIComponent(q + ' natural wood')}`,
+    `https://${host}/s?k=${encodeURIComponent(q)}&s=exact-aware-popularity-rank`,
+    `https://${host}/s?k=${encodeURIComponent(q + ' kitchen')}`,
   ]
 
   const cards = new Map<string, Card>()

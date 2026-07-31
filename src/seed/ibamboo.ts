@@ -1,95 +1,92 @@
 import { defaultFilters, newSite, type SiteConfig, type SourceCategory } from '../types'
 
-/** Starter iBamboo flash categories (subset of scripts/bsr/categories.json). */
+function bambooCat(
+  partial: Omit<SourceCategory, 'filters' | 'enabled'> & {
+    topN?: number
+    exclude?: string[]
+  },
+): SourceCategory {
+  const f = defaultFilters()
+  return {
+    id: partial.id,
+    label: partial.label,
+    browseNode: undefined, // search-first only — BSR nodes pollute with non-bamboo
+    searchQuery: partial.searchQuery,
+    siteCategory: partial.siteCategory,
+    enabled: true,
+    filters: {
+      ...f,
+      topN: partial.topN ?? 20,
+      includeKeywords: ['bamboo'],
+      requireKeywordMatch: true,
+      excludeKeywords: [
+        ...f.excludeKeywords,
+        ...(partial.exclude || []),
+      ],
+    },
+  }
+}
+
+/** Starter iBamboo flash categories — bamboo search only, hard keyword gate. */
 export function ibambooSeedSite(): SiteConfig {
   const cats: SourceCategory[] = [
-    {
+    bambooCat({
       id: 'cutting-boards',
-      label: 'Cutting Boards',
-      browseNode: '289863',
+      label: 'Bamboo cutting boards',
       searchQuery: 'bamboo cutting board',
-      enabled: true,
       siteCategory: 'cutting-boards',
-      filters: {
-        ...defaultFilters(),
-        topN: 25,
-        includeKeywords: ['bamboo'],
-        requireKeywordMatch: false,
-      },
-    },
-    {
+      topN: 22,
+    }),
+    bambooCat({
+      id: 'serving-boards',
+      label: 'Bamboo serving / cheese boards',
+      searchQuery: 'bamboo cheese board charcuterie',
+      siteCategory: 'cutting-boards',
+      topN: 12,
+    }),
+    bambooCat({
       id: 'kitchen-utensils',
-      label: 'Kitchen Utensils',
-      browseNode: '289754',
-      searchQuery: 'bamboo kitchen utensils set',
-      enabled: true,
+      label: 'Bamboo kitchen utensils',
+      searchQuery: 'bamboo kitchen utensils set cooking',
       siteCategory: 'kitchen',
-      filters: {
-        ...defaultFilters(),
-        topN: 25,
-        includeKeywords: ['bamboo'],
-      },
-    },
-    {
+      topN: 22,
+      exclude: ['plastic handle set only'],
+    }),
+    bambooCat({
       id: 'dining-tabletop',
       label: 'Bamboo dinnerware',
       searchQuery: 'bamboo dinnerware plates bowls set',
-      enabled: true,
       siteCategory: 'dining',
-      filters: {
-        ...defaultFilters(),
-        topN: 20,
-        includeKeywords: ['bamboo'],
-      },
-    },
-    {
+      topN: 18,
+    }),
+    bambooCat({
       id: 'bath',
-      label: 'Bath bamboo',
-      searchQuery: 'bamboo soap dish bathroom',
-      enabled: true,
+      label: 'Bamboo bath accessories',
+      searchQuery: 'bamboo soap dish bathroom accessories',
       siteCategory: 'bath',
-      filters: {
-        ...defaultFilters(),
-        topN: 15,
-        includeKeywords: ['bamboo'],
-      },
-    },
-    {
+      topN: 14,
+    }),
+    bambooCat({
       id: 'desk',
-      label: 'Desk bamboo',
-      searchQuery: 'bamboo monitor stand riser',
-      enabled: true,
+      label: 'Bamboo desk organizers',
+      searchQuery: 'bamboo monitor stand desk organizer',
       siteCategory: 'desk',
-      filters: {
-        ...defaultFilters(),
-        topN: 15,
-        includeKeywords: ['bamboo'],
-      },
-    },
-    {
+      topN: 14,
+    }),
+    bambooCat({
       id: 'organization',
-      label: 'Drawer organizers',
-      searchQuery: 'bamboo drawer organizer kitchen',
-      enabled: true,
+      label: 'Bamboo drawer organizers',
+      searchQuery: 'bamboo drawer organizer kitchen expandable',
       siteCategory: 'organization',
-      filters: {
-        ...defaultFilters(),
-        topN: 15,
-        includeKeywords: ['bamboo'],
-      },
-    },
-    {
+      topN: 14,
+    }),
+    bambooCat({
       id: 'outdoor',
-      label: 'Outdoor bamboo',
-      searchQuery: 'bamboo wind chime outdoor',
-      enabled: true,
+      label: 'Bamboo outdoor',
+      searchQuery: 'bamboo outdoor serving tray patio',
       siteCategory: 'outdoor',
-      filters: {
-        ...defaultFilters(),
-        topN: 12,
-        includeKeywords: ['bamboo'],
-      },
-    },
+      topN: 10,
+    }),
   ]
 
   const site = newSite({

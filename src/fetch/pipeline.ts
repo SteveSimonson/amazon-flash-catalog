@@ -1,14 +1,19 @@
 import type { Env } from '../env'
 import { publishCatalog } from '../storage/catalog'
 import { upsertSite } from '../storage/config'
-import type {
-  CatalogPayload,
-  FlashProduct,
-  SiteConfig,
+import {
+  blurbFromTitle,
+  type CatalogPayload,
+  type FlashProduct,
+  type SiteConfig,
 } from '../types'
-import { discoverCategory } from './bsr'
+import {
+  discoverCategory,
+  hydrateProductTitles,
+  isPlaceholderTitle,
+} from './bsr'
 import { enrichAsins, mergeEnrichment } from './creators'
-import { applyFilters } from './filters'
+import { applyFilters, qualityGateBamboo } from './filters'
 
 function weekOfIso(d = new Date()): string {
   const date = new Date(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()))
@@ -22,6 +27,17 @@ export type RefreshResult = {
   catalog?: CatalogPayload
   error?: string
   publishedKeys?: { latestKey: string; runKey: string }
+}
+
+function finalizeProduct(p: FlashProduct, weekOf: string): FlashProduct {
+  const title = (p.title || '').trim()
+  return {
+    ...p,
+    title,
+    weekOf,
+    limitedTime: true,
+    blurb: blurbFromTitle(title, p.siteCategory),
+  }
 }
 
 export async function refreshSite(
@@ -44,19 +60,38 @@ export async function refreshSite(
     const seen = new Set<string>()
 
     for (const cat of enabled) {
+      // Ensure hard bamboo keywords on every category
+      const filters = {
+        ...cat.filters,
+        includeKeywords:
+          cat.filters.includeKeywords?.length > 0
+            ? cat.filters.includeKeywords
+            : ['bamboo'],
+        requireKeywordMatch: true,
+      }
+
       let fetched = await discoverCategory(cat, {
         associateTag: tag,
         marketplace,
       })
       const fetchedCount = fetched.length
 
-      // Enrich before filters so rating/price filters can use API data when available
+      // Creators enrichment (soft-fail) then DP hydrate for remaining bad titles
       const enrichMap = await enrichAsins(
         env,
         fetched.map((p) => p.asin),
       )
       fetched = mergeEnrichment(fetched, enrichMap)
-      const kept = applyFilters(fetched, cat.filters)
+
+      const stillBad = fetched.filter(
+        (p) => isPlaceholderTitle(p.title) || !/\bbamboo\b/i.test(p.title),
+      )
+      if (stillBad.length) {
+        fetched = await hydrateProductTitles(fetched, marketplace, 28)
+      }
+
+      let kept = applyFilters(fetched, filters)
+      kept = qualityGateBamboo(kept)
 
       categoryStats.push({
         sourceCategoryId: cat.id,
@@ -69,8 +104,17 @@ export async function refreshSite(
         const key = p.asin.toUpperCase()
         if (seen.has(key)) continue
         seen.add(key)
-        all.push({ ...p, weekOf, limitedTime: true })
+        all.push(finalizeProduct(p, weekOf))
       }
+    }
+
+    // Final site-wide bamboo gate
+    const products = qualityGateBamboo(all).map((p) => finalizeProduct(p, weekOf))
+
+    if (products.length === 0) {
+      throw new Error(
+        'Quality gate removed every product — check search queries include bamboo and Amazon HTML parse is working',
+      )
     }
 
     const catalog: CatalogPayload = {
@@ -78,10 +122,10 @@ export async function refreshSite(
       siteName: site.name,
       generatedAt,
       weekOf,
-      productCount: all.length,
+      productCount: products.length,
       associateTag: tag,
       marketplace,
-      products: all,
+      products,
       categoryStats,
     }
 
@@ -90,7 +134,7 @@ export async function refreshSite(
     await upsertSite(env, {
       ...site,
       lastRunAt: generatedAt,
-      lastProductCount: all.length,
+      lastProductCount: products.length,
       lastError: undefined,
       lastErrorAt: undefined,
     })

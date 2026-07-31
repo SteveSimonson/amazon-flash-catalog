@@ -283,6 +283,8 @@ async function handleApi(
   if (path === '/api/bootstrap/ibamboo' && request.method === 'POST') {
     const body = (await request.json().catch(() => ({}))) as {
       refresh?: boolean
+      /** Replace categories with latest quality seed (bamboo-hard defaults) */
+      forceCategories?: boolean
     }
     const seed = ibambooSeedSite()
     const existing = (await loadConfig(env)).sites.find((s) => s.id === 'ibamboo')
@@ -290,7 +292,9 @@ async function handleApi(
       ? {
           ...existing,
           categories:
-            existing.categories.length > 0 ? existing.categories : seed.categories,
+            body.forceCategories || existing.categories.length === 0
+              ? seed.categories
+              : existing.categories,
           schedule: existing.schedule || seed.schedule,
           name: existing.name || seed.name,
           siteUrl: existing.siteUrl || seed.siteUrl,

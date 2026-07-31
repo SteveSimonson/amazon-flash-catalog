@@ -1,12 +1,15 @@
 /**
- * Lightweight Amazon Best Sellers / search discovery.
- * HTML shapes change; this is best-effort and safe to fail soft per category.
+ * Amazon search-first discovery for bamboo products.
+ * Prefers keyword search over broad BSR nodes (those mix in non-bamboo junk).
+ * Best-effort HTML parse + optional DP title hydration.
  */
 
 import type { FlashProduct, SourceCategory } from '../types'
 
 const UA =
-  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebChat/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
+  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
+
+const PLACEHOLDER_TITLE = /^amazon product\s+[a-z0-9]{10}$/i
 
 function weekOfIso(d = new Date()): string {
   const date = new Date(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()))
@@ -20,62 +23,110 @@ function affiliateUrl(asin: string, tag: string, marketplace: string): string {
   return `https://${host}/dp/${asin}?tag=${encodeURIComponent(tag)}`
 }
 
-function extractAsins(html: string): string[] {
-  const found = new Set<string>()
-  const re = /\/dp\/([A-Z0-9]{10})/gi
+function decodeEntities(s: string): string {
+  return s
+    .replace(/\\u0026/g, '&')
+    .replace(/\\"/g, '"')
+    .replace(/&amp;/g, '&')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+function cleanTitle(raw: string | undefined): string | undefined {
+  if (!raw) return undefined
+  let t = decodeEntities(raw)
+  // Strip Amazon noise prefixes
+  t = t.replace(/^Amazon\.com\s*:\s*/i, '').replace(/\s*:\s*Amazon\.com.*$/i, '')
+  t = t.replace(/\s*[-–|]\s*Amazon\.com.*$/i, '')
+  if (t.length < 8) return undefined
+  if (PLACEHOLDER_TITLE.test(t)) return undefined
+  // Drop pure UI chrome
+  if (/^(sponsored|best seller|overall pick|climate pledge)/i.test(t)) return undefined
+  return t.slice(0, 200)
+}
+
+function looksBamboo(text: string): boolean {
+  return /\bbamboo\b/i.test(text)
+}
+
+/** Ensure search queries always include bamboo. */
+export function bambooSearchQuery(cat: SourceCategory): string {
+  const base = (cat.searchQuery || cat.label || cat.id || '').trim()
+  if (!base) return 'bamboo home'
+  if (/\bbamboo\b/i.test(base)) return base
+  return `bamboo ${base}`
+}
+
+type Card = { asin: string; title?: string; image?: string }
+
+/**
+ * Parse Amazon search / list HTML into ASIN + title + image cards.
+ * Works against common search result markup (data-asin blocks).
+ */
+export function parseProductCards(html: string): Card[] {
+  const byAsin = new Map<string, Card>()
+
+  // Split on data-asin result tiles
+  const tileRe = /data-asin="([A-Z0-9]{10})"/gi
   let m: RegExpExecArray | null
-  while ((m = re.exec(html))) {
-    found.add(m[1].toUpperCase())
-    if (found.size >= 100) break
+  const indices: Array<{ asin: string; i: number }> = []
+  while ((m = tileRe.exec(html))) {
+    indices.push({ asin: m[1].toUpperCase(), i: m.index })
   }
-  // data-asin attributes
-  const re2 = /data-asin="([A-Z0-9]{10})"/gi
-  while ((m = re2.exec(html))) {
-    found.add(m[1].toUpperCase())
-    if (found.size >= 120) break
-  }
-  return [...found]
-}
 
-function extractTitleNearAsin(html: string, asin: string): string | undefined {
-  const idx = html.toUpperCase().indexOf(asin.toUpperCase())
-  if (idx < 0) return undefined
-  const window = html.slice(Math.max(0, idx - 1200), idx + 1600)
-  const patterns = [
-    /"title"\s*:\s*"((?:\\.|[^"\\]){8,240})"/i,
-    /data-title="([^"]{8,240})"/i,
-    /aria-label="([^"]{8,240})"/i,
-    /alt="([^"]{8,240})"/i,
-    /<span[^>]*class="[^"]*a-size[^"]*"[^>]*>([^<]{8,240})<\/span>/i,
-    /<h2[^>]*>[\s\S]*?<span[^>]*>([^<]{8,240})<\/span>/i,
-  ]
-  for (const re of patterns) {
-    const m = window.match(re)
-    if (!m?.[1]) continue
-    const t = m[1]
-      .replace(/\\u0026/g, '&')
-      .replace(/\\"/g, '"')
-      .replace(/&amp;/g, '&')
-      .replace(/&quot;/g, '"')
-      .replace(/&#39;/g, "'")
-      .trim()
-    if (t.length >= 8 && !/^amazon product/i.test(t)) return t.slice(0, 200)
-  }
-  return undefined
-}
+  for (let t = 0; t < indices.length; t++) {
+    const { asin, i } = indices[t]
+    if (byAsin.has(asin)) continue
+    const end = t + 1 < indices.length ? indices[t + 1].i : Math.min(html.length, i + 6000)
+    const block = html.slice(i, end)
 
-function extractImageNearAsin(html: string, asin: string): string | undefined {
-  const idx = html.toUpperCase().indexOf(asin.toUpperCase())
-  if (idx < 0) return undefined
-  const window = html.slice(Math.max(0, idx - 800), idx + 1200)
-  const m =
-    window.match(
-      /(https:\/\/m\.media-amazon\.com\/images\/I\/[A-Za-z0-9._%+-]+\.jpg)/i,
-    ) ||
-    window.match(
-      /(https:\/\/images-na\.ssl-images-amazon\.com\/images\/I\/[A-Za-z0-9._%+-]+)/i,
-    )
-  return m?.[1]
+    const titleMatch =
+      block.match(
+        /<span[^>]*class="[^"]*a-size-(?:base-plus|medium|base)[^"]*a-color-base[^"]*a-text-normal[^"]*"[^>]*>([^<]{8,240})<\/span>/i,
+      ) ||
+      block.match(
+        /<h2[^>]*>[\s\S]*?<span[^>]*class="[^"]*a-text-normal[^"]*"[^>]*>([^<]{8,240})<\/span>/i,
+      ) ||
+      block.match(/<h2[^>]*aria-label="([^"]{8,240})"/i) ||
+      block.match(/class="[^"]*s-title-instructions-style[^"]*"[\s\S]*?<span[^>]*>([^<]{8,240})<\/span>/i)
+
+    const imgMatch =
+      block.match(
+        /src="(https:\/\/m\.media-amazon\.com\/images\/I\/[A-Za-z0-9,._%-]+\._AC_[^"]+\.jpg)"/i,
+      ) ||
+      block.match(
+        /src="(https:\/\/m\.media-amazon\.com\/images\/I\/[A-Za-z0-9,._%-]+\.jpg)"/i,
+      ) ||
+      block.match(
+        /(https:\/\/m\.media-amazon\.com\/images\/I\/[A-Za-z0-9,._%-]+)/i,
+      )
+
+    const title = cleanTitle(titleMatch?.[1])
+    byAsin.set(asin, {
+      asin,
+      title,
+      image: imgMatch?.[1]?.replace(/\._AC_[A-Z0-9,]+_\./, '._AC_SL500_.'),
+    })
+    if (byAsin.size >= 80) break
+  }
+
+  // JSON embedded titles (some SERP payloads)
+  const jsonTitleRe =
+    /"asin"\s*:\s*"([A-Z0-9]{10})"[\s\S]{0,400}?"title"\s*:\s*"((?:\\.|[^"\\]){8,240})"/gi
+  while ((m = jsonTitleRe.exec(html))) {
+    const asin = m[1].toUpperCase()
+    const title = cleanTitle(m[2])
+    const prev = byAsin.get(asin) || { asin }
+    if (title && (!prev.title || PLACEHOLDER_TITLE.test(prev.title))) {
+      byAsin.set(asin, { ...prev, title })
+    }
+  }
+
+  return [...byAsin.values()]
 }
 
 async function fetchHtml(url: string): Promise<string> {
@@ -91,48 +142,109 @@ async function fetchHtml(url: string): Promise<string> {
   return res.text()
 }
 
+/** Hydrate missing titles from product detail pages (capped concurrency). */
+export async function hydrateProductTitles(
+  products: FlashProduct[],
+  marketplace: string,
+  limit = 24,
+): Promise<FlashProduct[]> {
+  const host = marketplace.replace(/^https?:\/\//, '')
+  const need = products.filter(
+    (p) => !p.title || PLACEHOLDER_TITLE.test(p.title) || !looksBamboo(p.title),
+  )
+  const targets = need.slice(0, limit)
+  if (!targets.length) return products
+
+  const byAsin = new Map<string, { title?: string; image?: string }>()
+  const queue = [...targets]
+  const workers = Array.from({ length: Math.min(4, queue.length) }, async () => {
+    while (queue.length) {
+      const p = queue.shift()
+      if (!p) break
+      try {
+        const html = await fetchHtml(`https://${host}/dp/${p.asin}`)
+        const og =
+          html.match(
+            /<meta\s+property="og:title"\s+content="([^"]{8,240})"/i,
+          ) || html.match(/<meta\s+name="title"\s+content="([^"]{8,240})"/i)
+        const h1 = html.match(/id="productTitle"[^>]*>\s*([^<]{8,240})\s*</i)
+        const title = cleanTitle(og?.[1] || h1?.[1])
+        const img =
+          html.match(
+            /id="landingImage"[^>]*src="(https:\/\/m\.media-amazon\.com\/images\/I\/[^"]+)"/i,
+          ) ||
+          html.match(
+            /"hiRes"\s*:\s*"(https:\/\/m\.media-amazon\.com\/images\/I\/[^"]+)"/i,
+          )
+        if (title || img) {
+          byAsin.set(p.asin.toUpperCase(), {
+            title,
+            image: img?.[1],
+          })
+        }
+      } catch {
+        // skip
+      }
+    }
+  })
+  await Promise.all(workers)
+
+  return products.map((p) => {
+    const h = byAsin.get(p.asin.toUpperCase())
+    if (!h) return p
+    return {
+      ...p,
+      title: h.title || p.title,
+      image: h.image || p.image,
+    }
+  })
+}
+
+export function isPlaceholderTitle(title: string | undefined): boolean {
+  if (!title) return true
+  return PLACEHOLDER_TITLE.test(title)
+}
+
 export async function discoverCategory(
   cat: SourceCategory,
   opts: { associateTag: string; marketplace: string },
 ): Promise<FlashProduct[]> {
   const host = opts.marketplace.replace(/^https?:\/\//, '')
-  const urls: string[] = []
-  if (cat.browseNode) {
-    urls.push(`https://${host}/gp/bestsellers/home-garden/${cat.browseNode}`)
-    urls.push(`https://${host}/gp/bestsellers/kitchen/${cat.browseNode}`)
-    urls.push(`https://${host}/Best-Sellers/zgbs/home-garden/${cat.browseNode}`)
-  }
-  if (cat.searchQuery) {
-    const q = encodeURIComponent(cat.searchQuery)
-    urls.push(`https://${host}/s?k=${q}`)
-  }
-  if (urls.length === 0) {
-    const q = encodeURIComponent(cat.label)
-    urls.push(`https://${host}/s?k=${q}`)
-  }
+  const q = bambooSearchQuery(cat)
+  // Search-first only — broad BSR nodes inject non-bamboo junk.
+  const urls = [
+    `https://${host}/s?k=${encodeURIComponent(q)}&i=garden&rh=n%3A1055398`,
+    `https://${host}/s?k=${encodeURIComponent(q)}`,
+    `https://${host}/s?k=${encodeURIComponent(q + ' natural wood')}`,
+  ]
 
-  const asins = new Set<string>()
-  let htmlBlob = ''
+  const cards = new Map<string, Card>()
   for (const url of urls) {
     try {
       const html = await fetchHtml(url)
-      htmlBlob += html
-      for (const a of extractAsins(html)) asins.add(a)
-      if (asins.size >= 60) break
+      for (const c of parseProductCards(html)) {
+        if (!cards.has(c.asin)) cards.set(c.asin, c)
+      }
+      // Enough high-quality cards with bamboo titles?
+      const bambooish = [...cards.values()].filter(
+        (c) => c.title && looksBamboo(c.title),
+      ).length
+      if (bambooish >= 20 || cards.size >= 50) break
     } catch {
-      // try next URL shape
+      // try next
     }
   }
 
   const weekOf = weekOfIso()
   const products: FlashProduct[] = []
   let rank = 1
-  for (const asin of asins) {
+  for (const c of cards.values()) {
+    const title = c.title || `Amazon product ${c.asin}`
     products.push({
-      asin,
-      title: extractTitleNearAsin(htmlBlob, asin) || `Amazon product ${asin}`,
-      url: affiliateUrl(asin, opts.associateTag, host),
-      image: extractImageNearAsin(htmlBlob, asin),
+      asin: c.asin,
+      title,
+      url: affiliateUrl(c.asin, opts.associateTag, host),
+      image: c.image,
       bsrRank: rank++,
       sourceCategoryId: cat.id,
       siteCategory: cat.siteCategory,
@@ -141,5 +253,14 @@ export async function discoverCategory(
       enriched: false,
     })
   }
+
+  // Prefer items that already look like bamboo; still return all for hydrate step
+  products.sort((a, b) => {
+    const ba = looksBamboo(a.title) ? 0 : 1
+    const bb = looksBamboo(b.title) ? 0 : 1
+    if (ba !== bb) return ba - bb
+    return (a.bsrRank ?? 99) - (b.bsrRank ?? 99)
+  })
+
   return products
 }

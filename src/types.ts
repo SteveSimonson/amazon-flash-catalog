@@ -17,20 +17,23 @@ export type CategoryFilters = {
   /** Inclusive price band in USD; null = open */
   minPrice: number | null
   maxPrice: number | null
-  /** Title/keyword must match at least one (case-insensitive); empty = any */
+  /** Title must match at least one (case-insensitive) */
   includeKeywords: string[]
   /** Drop if title matches any */
   excludeKeywords: string[]
-  /** Prefer / require “bamboo” bias (soft: score boost; hard: must match) */
+  /**
+   * When true (default), includeKeywords are hard requirements.
+   * Soft mode is discouraged for bamboo flash catalogs.
+   */
   requireKeywordMatch: boolean
 }
 
 export type SourceCategory = {
   id: string
   label: string
-  /** Amazon Best Sellers browse node id, if known */
+  /** Amazon Best Sellers browse node id (optional; search is preferred) */
   browseNode?: string
-  /** Free-text Amazon search used when node is sparse or missing */
+  /** Free-text Amazon search — should include "bamboo" */
   searchQuery?: string
   enabled: boolean
   /** Map into the consuming site’s shelf / category slug */
@@ -80,6 +83,8 @@ export type FlashProduct = {
   limitedTime: boolean
   weekOf: string
   enriched: boolean
+  /** Short merchandising blurb for storefronts */
+  blurb?: string
   raw?: Record<string, unknown>
 }
 
@@ -111,14 +116,20 @@ export type SessionUser = {
 
 export function defaultFilters(): CategoryFilters {
   return {
-    topN: 40,
+    topN: 30,
     minRating: 0,
     minReviews: 0,
     minPrice: null,
     maxPrice: null,
     includeKeywords: ['bamboo'],
-    excludeKeywords: [],
-    requireKeywordMatch: false,
+    excludeKeywords: [
+      'plastic',
+      'silicone',
+      'polyester',
+      'phone case',
+      'screen protector',
+    ],
+    requireKeywordMatch: true,
   }
 }
 
@@ -142,4 +153,20 @@ export function newSite(partial: {
     createdAt: now,
     updatedAt: now,
   }
+}
+
+/** Build a clean storefront blurb from a real product title. */
+export function blurbFromTitle(title: string, siteCategory: string): string {
+  const room =
+    siteCategory === 'cutting-boards'
+      ? 'boards & serving'
+      : siteCategory === 'desk'
+        ? 'workspace'
+        : siteCategory === 'organization'
+          ? 'organization'
+          : siteCategory === 'dining'
+            ? 'tabletop'
+            : siteCategory
+  const short = title.length > 90 ? `${title.slice(0, 87)}…` : title
+  return `${short} — limited-time bamboo pick for the ${room}. Buy on Amazon via iBamboo.`
 }

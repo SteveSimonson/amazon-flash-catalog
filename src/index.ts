@@ -3,9 +3,12 @@ import {
   exchangeCode,
   fetchGitHubUser,
   githubAuthorizeUrl,
+  isLoginAllowed,
   isOrgAllowed,
+  isUserAllowed,
   listUserOrgs,
 } from './auth/github'
+import { ibambooSeedSite } from './seed/ibamboo'
 import {
   clearOauthStateCookie,
   clearSessionCookie,
@@ -72,9 +75,23 @@ function isSecure(url: URL): boolean {
   return url.protocol === 'https:'
 }
 
+function hasBearerAdmin(request: Request, env: Env): boolean {
+  const token = env.ADMIN_API_TOKEN?.trim()
+  if (!token) return false
+  const auth = request.headers.get('Authorization') || ''
+  const m = auth.match(/^Bearer\s+(.+)$/i)
+  return Boolean(m && m[1].trim() === token)
+}
+
 /** Block cross-site mutating API calls (defense in depth with SameSite=Lax). */
-function assertSameOrigin(request: Request, url: URL): Response | null {
+function assertSameOrigin(
+  request: Request,
+  url: URL,
+  env: Env,
+): Response | null {
   if (request.method === 'GET' || request.method === 'HEAD') return null
+  // Machine tokens are not browser CSRF vectors
+  if (hasBearerAdmin(request, env)) return null
   const origin = request.headers.get('Origin')
   if (origin) {
     try {
@@ -113,6 +130,19 @@ async function requireAdmin(
       setCookie?: string
     }
 > {
+  // Machine bootstrap / CI
+  if (hasBearerAdmin(request, env)) {
+    return {
+      user: {
+        login: 'admin-token',
+        id: 0,
+        orgs: env.ALLOWED_GITHUB_ORG
+          ? [env.ALLOWED_GITHUB_ORG.toLowerCase()]
+          : [],
+      },
+    }
+  }
+
   if (!env.SESSION_SECRET) {
     return json({ error: 'SESSION_SECRET not configured' }, 500)
   }
@@ -130,21 +160,26 @@ async function requireAdmin(
       payload.ghToken,
       env.ALLOWED_GITHUB_ORG,
     )
-    if (!member) {
+    const userOk = isUserAllowed(user, env.ALLOWED_GITHUB_USERS)
+    if (!member && !userOk) {
       return json(
-        { error: 'Forbidden: no longer a member of allowed GitHub org' },
+        { error: 'Forbidden: not allowed (org/user allowlist)' },
         403,
       )
     }
-    const orgs = await listUserOrgs(payload.ghToken)
-    user = { ...user, orgs }
+    if (member) {
+      const orgs = await listUserOrgs(payload.ghToken)
+      user = { ...user, orgs }
+    }
     const token = await signSession(user, env.SESSION_SECRET, {
       ghToken: payload.ghToken,
       orgsCheckedAt: now,
     })
     setCookie = setSessionCookie(token, isSecure(new URL(request.url)))
-  } else if (!isOrgAllowed(user, env.ALLOWED_GITHUB_ORG)) {
-    return json({ error: 'Forbidden: not a member of allowed GitHub org' }, 403)
+  } else if (
+    !isLoginAllowed(user, env.ALLOWED_GITHUB_ORG, env.ALLOWED_GITHUB_USERS)
+  ) {
+    return json({ error: 'Forbidden: not allowed (org/user allowlist)' }, 403)
   }
 
   return { user, setCookie }
@@ -219,7 +254,7 @@ async function handleApi(
     return json({ ok: true, app: env.APP_NAME || 'amazon-flash-catalog' })
   }
 
-  const csrf = assertSameOrigin(request, url)
+  const csrf = assertSameOrigin(request, url, env)
   if (csrf) return csrf
 
   const auth = await requireAdmin(request, env)
@@ -228,6 +263,35 @@ async function handleApi(
 
   if (path === '/api/me' && request.method === 'GET') {
     return withAdminCookie(json({ user }), setCookie)
+  }
+
+  // Seed iBamboo site + optional immediate refresh
+  if (path === '/api/bootstrap/ibamboo' && request.method === 'POST') {
+    const body = (await request.json().catch(() => ({}))) as {
+      refresh?: boolean
+    }
+    const seed = ibambooSeedSite()
+    const existing = (await loadConfig(env)).sites.find((s) => s.id === 'ibamboo')
+    const site = existing
+      ? {
+          ...existing,
+          categories:
+            existing.categories.length > 0 ? existing.categories : seed.categories,
+          schedule: existing.schedule || seed.schedule,
+          name: existing.name || seed.name,
+          siteUrl: existing.siteUrl || seed.siteUrl,
+          enabled: true,
+        }
+      : seed
+    await upsertSite(env, site)
+    if (body.refresh !== false) {
+      const result = await refreshSite(env, site)
+      return withAdminCookie(
+        json({ ok: result.ok, site, refresh: result }, result.ok ? 200 : 502),
+        setCookie,
+      )
+    }
+    return withAdminCookie(json({ ok: true, site, refresh: null }), setCookie)
   }
 
   if (path === '/api/sites' && request.method === 'GET') {
@@ -342,7 +406,10 @@ async function handleAdminPages(
   const appName = env.APP_NAME || 'Amazon Flash Catalog'
 
   if (url.pathname === '/' || url.pathname === '/login') {
-    if (user && isOrgAllowed(user, env.ALLOWED_GITHUB_ORG)) {
+    if (
+      user &&
+      isLoginAllowed(user, env.ALLOWED_GITHUB_ORG, env.ALLOWED_GITHUB_USERS)
+    ) {
       return redirect('/admin')
     }
     const err = url.searchParams.get('error') || undefined
@@ -350,11 +417,13 @@ async function handleAdminPages(
   }
 
   if (!user) return redirect('/login')
-  if (!isOrgAllowed(user, env.ALLOWED_GITHUB_ORG)) {
+  if (
+    !isLoginAllowed(user, env.ALLOWED_GITHUB_ORG, env.ALLOWED_GITHUB_USERS)
+  ) {
     return html(
       loginPage(
         appName,
-        `GitHub user @${user.login} is not in org "${env.ALLOWED_GITHUB_ORG}".`,
+        `GitHub user @${user.login} is not allowed (org/user allowlist).`,
       ),
       403,
       { 'Set-Cookie': clearSessionCookie(isSecure(url)) },
@@ -412,15 +481,19 @@ export default {
         try {
           const token = await exchangeCode(env, code)
           const ghUser = await fetchGitHubUser(token)
-          const member = await checkOrgMembership(
-            token,
+          const member = env.ALLOWED_GITHUB_ORG
+            ? await checkOrgMembership(token, env.ALLOWED_GITHUB_ORG)
+            : false
+          const allowed = isLoginAllowed(
+            ghUser,
             env.ALLOWED_GITHUB_ORG,
+            env.ALLOWED_GITHUB_USERS,
           )
-          if (!member && !isOrgAllowed(ghUser, env.ALLOWED_GITHUB_ORG)) {
+          if (!member && !allowed) {
             return redirect(
               '/login?error=' +
                 encodeURIComponent(
-                  `Not a member of GitHub org ${env.ALLOWED_GITHUB_ORG}`,
+                  `Not allowed (org ${env.ALLOWED_GITHUB_ORG || '—'} / user allowlist)`,
                 ),
             )
           }

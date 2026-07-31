@@ -136,3 +136,24 @@ export function isOrgAllowed(user: SessionUser, allowedOrg: string): boolean {
   if (!org) return false
   return user.orgs.map((o) => o.toLowerCase()).includes(org)
 }
+
+/** True if login is in comma-separated ALLOWED_GITHUB_USERS. */
+export function isUserAllowed(
+  user: SessionUser,
+  allowedUsersCsv: string | undefined,
+): boolean {
+  const list = (allowedUsersCsv || '')
+    .split(',')
+    .map((s) => s.trim().toLowerCase())
+    .filter(Boolean)
+  if (!list.length) return false
+  return list.includes(user.login.toLowerCase())
+}
+
+export function isLoginAllowed(
+  user: SessionUser,
+  allowedOrg: string,
+  allowedUsersCsv?: string,
+): boolean {
+  return isOrgAllowed(user, allowedOrg) || isUserAllowed(user, allowedUsersCsv)
+}

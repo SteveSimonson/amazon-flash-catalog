@@ -1,0 +1,37 @@
+{
+  "name": "amazon-flash-catalog",
+  "main": "src/index.ts",
+  "compatibility_date": "2025-07-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": true,
+  // Bind after first deploy:
+  //   npx wrangler r2 bucket create amazon-flash-catalogs
+  //   set secrets: SESSION_SECRET, GITHUB_CLIENT_ID, GITHUB_CLIENT_SECRET, …
+  "r2_buckets": [
+    {
+      "binding": "CATALOGS",
+      "bucket_name": "amazon-flash-catalogs"
+    }
+  ],
+  "triggers": {
+    // Cron checks each site's optional schedule and runs due refreshes.
+    "crons": ["0 * * * *"]
+  },
+  "vars": {
+    "APP_NAME": "Amazon Flash Catalog",
+    // GitHub org slug whose members may log in (e.g. "my-company")
+    "ALLOWED_GITHUB_ORG": "",
+    // Public origin of this worker (set after first deploy)
+    "APP_BASE_URL": "http://127.0.0.1:8787",
+    "AMAZON_ASSOCIATE_TAG": "iu0e3-20",
+    "AMAZON_MARKETPLACE": "www.amazon.com"
+  }
+  // Secrets (wrangler secret put …):
+  //   SESSION_SECRET
+  //   GITHUB_CLIENT_ID
+  //   GITHUB_CLIENT_SECRET
+  // Optional Creators API enrichment:
+  //   AMAZON_CREATORS_CREDENTIAL_ID
+  //   AMAZON_CREATORS_CREDENTIAL_SECRET
+  //   AMAZON_CREATORS_CREDENTIAL_VERSION  (default 3.1)
+}

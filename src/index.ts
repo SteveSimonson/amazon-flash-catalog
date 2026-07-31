@@ -4,7 +4,6 @@ import {
   fetchGitHubUser,
   githubAuthorizeUrl,
   isLoginAllowed,
-  isOrgAllowed,
   isUserAllowed,
   listUserOrgs,
 } from './auth/github'
